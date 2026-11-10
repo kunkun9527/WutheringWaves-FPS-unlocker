@@ -1377,6 +1377,8 @@ DWORD WINAPI LoadConfigThread(LPVOID lpParam)
     return 0;
 }
 
+void StartFGTrace(HMODULE hModule);
+
 // ==================== DllMain ====================
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
     switch (dwReason) {
@@ -1392,6 +1394,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD dwReason, LPVOID lpReserved) {
             return TRUE;
         }
 
+        StartFGTrace(hModule);
         CreateThread(nullptr, 0, LoadConfigThread, hModule, 0, nullptr);
 
         // 原有线程

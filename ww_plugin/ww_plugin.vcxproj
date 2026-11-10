@@ -94,6 +94,7 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClCompile Include="dllmain_nodbg.cpp" />
+    <ClCompile Include="fgtrace.cpp" />
     <ClCompile Include="ext\CppSDK\SDK\Basic.cpp" />
     <ClCompile Include="ext\CppSDK\SDK\CoreUObject_functions.cpp" />
     <ClCompile Include="ext\CppSDK\SDK\Engine_functions.cpp" />
