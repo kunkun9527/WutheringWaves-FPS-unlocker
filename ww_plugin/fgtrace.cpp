@@ -4,7 +4,7 @@
 // FConsoleVariable<int32> object in memory and writes its shadowed values back.
 // Enabled only when ww_fgtrace.ini next to this DLL has [FGTrace] Enable=1.
 //   ForceMode=0  log cvar changes only;  ForceMode=2  force non-zero by polling
-//   ForceMode=3  priority lock (game's Set is rejected by UE), falls back to polling
+//   (Raising the cvar's SetBy priority was tried and does not stop the game's writes.)
 //   ForceValue=1 value written while forcing (1 = always on; 0 = game's last non-zero)
 #include <windows.h>
 #include <atomic>
@@ -75,8 +75,6 @@ const wchar_t kEnableName[] = L"r.Streamline.DLSSG.Enable";
 const wchar_t kEnableHelp[] = L"DLSS-FG mode (default = 0)\n0: off\n1: always on\n2: auto mode (on only when it helps)\n";
 constexpr int kScanFrom = 0x18;
 constexpr int kScanTo = 0x60;      // keep the search inside a small object
-constexpr int kFlagsOff = 0x18;    // EConsoleVariableFlags, right after FString Help
-constexpr uint32_t kMaxSetBy = 0x09; // ECVF_SetByConsole, highest UE4.26 priority
 
 bool PrivateRW(const MEMORY_BASIC_INFORMATION& m)
 {
@@ -234,44 +232,25 @@ void ForceLoop()
     if (!LocateEnableCVar(cv, v)) { Log("cvar object not found; ForceFG disabled"); return; }
 
     // Learning: follow the game's own changes until the offset is confirmed.
-    // EConsoleVariableFlags follows the Help FString (+0x18); its top byte is the SetBy
-    // priority. UE ignores a Set whose priority is lower than the stored one.
-    uint32_t f = 0;
-    bool flagsOk = ReadInt(cv.obj + kFlagsOff, reinterpret_cast<int*>(&f)) && (f >> 24) <= kMaxSetBy;
-    const uint32_t flagsLow = f & 0x00FFFFFF;
-    uint32_t gameSetBy = f >> 24;
-    Log("flags +0x%X = 0x%08X", kFlagsOff, f);
     int last = v, lastNonZero = v;
     while (cv.dataOff < 0) {
         if (!StillValid(cv)) { Log("object changed during learning; ForceFG disabled"); return; }
         if (cv.numCandidates == 0) { Log("no candidate survived; ForceFG disabled"); return; }
         if (SafeCVar(kEnableName, &v) && v != last) {
             Confirm(cv, v);
-            uint32_t nf = 0;
-            if (!ReadInt(cv.obj + kFlagsOff, reinterpret_cast<int*>(&nf)) || (nf & 0x00FFFFFF) != flagsLow || (nf >> 24) > kMaxSetBy)
-                flagsOk = false;
-            else if ((nf >> 24) > gameSetBy)
-                gameSetBy = nf >> 24;
-            Log("game set Enable %d -> %d, flags 0x%08X", last, v, nf);
+            Log("game set Enable %d -> %d", last, v);
             last = v;
             if (v != 0) lastNonZero = v;
         }
         Sleep(20);
     }
 
-    const bool useLock = g_forceMode == 3 && flagsOk;
-    const uint32_t lockFlags = flagsLow | ((gameSetBy + 1) << 24);
-    const uint32_t openFlags = flagsLow | (gameSetBy << 24);
-    if (g_forceMode == 3 && !flagsOk) Log("flags layout not as expected; using polling only");
-    if (useLock) Log("priority lock: game SetBy 0x%02X -> lock 0x%02X", gameSetBy, gameSetBy + 1);
-
-    bool on = true, keyDown = false, locked = false, lockFailed = false;
+    bool on = true, keyDown = false;
     RECT lastRect{};
     ULONGLONG rectChanged = 0, lastLog = 0, lastWindowCheck = 0;
     bool stable = false;
     unsigned writes = 0, zeroSeen = 0;
-    int lastS0 = last, lockedValue = 0;
-    auto setFlags = [&](uint32_t value) { return WriteInt(cv.obj + kFlagsOff, static_cast<int>(value)); };
+    int lastS0 = last;
     for (;;) {
         if (KeyPressedEdge(keyDown)) { on = !on; Log("ForceFG toggled %s", on ? "ON" : "OFF"); }
 
@@ -281,7 +260,6 @@ void ForceLoop()
             return;
         }
         if ((unsigned)s0 > 2 || (unsigned)s1 > 2) {
-            if (locked) setFlags(openFlags);
             Log("unexpected values game=%d render=%d; ForceFG stopped", s0, s1);
             return;
         }
@@ -304,38 +282,16 @@ void ForceLoop()
             stable = w && !IsIconic(w) && now - rectChanged > 3000;
         }
 
-        if (locked) {
-            uint32_t cf = 0;
-            bool flagsKept = ReadInt(cv.obj + kFlagsOff, reinterpret_cast<int*>(&cf)) && cf == lockFlags;
-            if (!flagsKept || s0 != lockedValue || s1 != lockedValue) {
-                Log("priority lock did not hold (flags 0x%08X game=%d render=%d); polling from now on", cf, s0, s1);
-                lockFailed = true;
-            }
-            if (lockFailed || !on || !stable) {     // let the game control FG again (toggle, resize, minimize)
-                if (!setFlags(openFlags)) { Log("flags write failed; ForceFG stopped"); return; }
-                locked = false;
-                if (!lockFailed) Log("priority lock released");
-            }
-        }
-
-        const bool wantLock = useLock && !lockFailed && on && stable;
-        if (on && stable && (s0 == 0 || s1 == 0 || (wantLock && !locked))) {
+        if (on && stable && (s0 == 0 || s1 == 0)) {
             int target = g_forceValue > 0 ? g_forceValue : lastNonZero;
             if (!WriteInt(cv.obj + cv.dataOff, target) || !WriteInt(cv.obj + cv.dataOff + 4, target)) {
-                if (locked) setFlags(openFlags);
                 Log("write failed; ForceFG stopped");
                 return;
             }
             if (writes++ == 0) Log("forcing Enable to %d", target);
             lastS0 = target;
-            if (wantLock && !locked) {
-                if (!setFlags(lockFlags)) { Log("flags write failed; ForceFG stopped"); return; }
-                locked = true;
-                lockedValue = target;
-                Log("priority lock set (value %d)", target);
-            }
         }
-        Sleep(locked ? 20 : 1);
+        Sleep(1);
     }
 }
 
