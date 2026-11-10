@@ -2,12 +2,15 @@
 // The game turns DLSS-FG off by setting the cvar r.Streamline.DLSSG.Enable to 0
 // (menus/dialogue). Console commands from a plugin are ignored, so this locates the
 // FConsoleVariable<int32> object in memory and writes its shadowed values back.
-// Enabled only when ww_fgtrace.ini next to this DLL has [FGTrace] Enable=1.
-//   ForceMode=0  log cvar changes only;  ForceMode=2  force non-zero by polling
-//   (Raising the cvar's SetBy priority was tried and does not stop the game's writes.)
-//   ForceValue=1 value written while forcing (1 = always on; 0 = game's last non-zero)
+// (Raising the cvar's SetBy priority was tried and does not stop the game's writes.)
+//
+// Runs only if one of these is on at launch; afterwards they are re-read once a second
+// from configww.ini [Configs] (written by the launcher):
+//   EnableForceFG=1  keep Enable at 1 (always on) whenever the game sets it to 0
+//   FGSkipMenus=1    set r.Streamline.DLSSG.FullScreenMenuDetection=1, so Streamline
+//                    itself turns FG off on full screen menus
+// Ctrl+F9 toggles forcing in game. Log: ww_fgtrace.log next to this DLL.
 #include <windows.h>
-#include <atomic>
 #include <climits>
 #include <cstdint>
 #include <cstdarg>
@@ -25,11 +28,10 @@ extern bool scanOffsetsDone;
 namespace {
 
 wchar_t g_logPath[MAX_PATH];
+wchar_t g_configPath[MAX_PATH];
 std::mutex g_logMutex;
 uintptr_t g_base = 0;
 size_t g_imageSize = 0;
-int g_forceMode = 0;
-int g_forceValue = 1;
 
 void Log(const char* fmt, ...)
 {
@@ -48,6 +50,19 @@ void Log(const char* fmt, ...)
     fclose(fp);
 }
 
+struct Settings {
+    bool force = false;
+    bool skipMenus = false;
+};
+
+Settings ReadSettings()
+{
+    Settings s;
+    s.force = GetPrivateProfileIntW(L"Configs", L"EnableForceFG", 0, g_configPath) == 1;
+    s.skipMenus = GetPrivateProfileIntW(L"Configs", L"FGSkipMenus", 0, g_configPath) == 1;
+    return s;
+}
+
 bool InImage(uintptr_t a) { return a >= g_base && a < g_base + g_imageSize; }
 
 bool SafeRead(const void* src, void* dst, size_t n)
@@ -61,8 +76,13 @@ bool WriteInt(uintptr_t a, int v)
     __try { *reinterpret_cast<volatile int*>(a) = v; return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+bool WriteByte(uintptr_t a, unsigned char v)
+{
+    __try { *reinterpret_cast<volatile unsigned char*>(a) = v; return true; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
 
-// Reads a cvar through KismetSystemLibrary (ProcessEvent). Used only while learning.
+// Reads a cvar through KismetSystemLibrary (ProcessEvent). Used for learning and verifying.
 int CVarImpl(const wchar_t* name) { return UKismetSystemLibrary::GetConsoleVariableIntValue(FString(name)); }
 bool SafeCVar(const wchar_t* name, int* out)
 {
@@ -70,9 +90,11 @@ bool SafeCVar(const wchar_t* name, int* out)
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
 
-// ---------------- locate the cvar object ----------------
+// ---------------- locate cvar objects ----------------
 const wchar_t kEnableName[] = L"r.Streamline.DLSSG.Enable";
 const wchar_t kEnableHelp[] = L"DLSS-FG mode (default = 0)\n0: off\n1: always on\n2: auto mode (on only when it helps)\n";
+const wchar_t kMenuName[] = L"r.Streamline.DLSSG.FullScreenMenuDetection";
+const wchar_t kMenuHelp[] = L"Automatically disable DLSS-FG if full screen menus are detected (default = false)\n";
 constexpr int kScanFrom = 0x18;
 constexpr int kScanTo = 0x60;      // keep the search inside a small object
 
@@ -114,6 +136,57 @@ void ForEachPrivateRW(F f)
     }
 }
 
+struct CVarObj {
+    uintptr_t obj = 0;
+    uintptr_t vtable = 0;
+    uintptr_t help = 0;
+    unsigned char dump[kScanTo + 8];
+};
+
+// Finds console variable objects whose FString Help (right after the vtable) points
+// to a heap copy of `help`.
+template <size_t N>
+int FindCVarObjects(const wchar_t (&help)[N], CVarObj* out, int max)
+{
+    const size_t bytes = N * sizeof(wchar_t);           // includes terminator
+    uintptr_t strHits[8];
+    int ns = 0;
+    ULONGLONG t0 = GetTickCount64();
+    ForEachPrivateRW([&](const MEMORY_BASIC_INFORMATION& m) {
+        ns += FindWStrInRegion((const char*)m.BaseAddress, m.RegionSize, help, bytes, strHits + ns, 8 - ns);
+        return ns < 8;
+    });
+    Log("help string copies on heap: %d (%llu ms)", ns, GetTickCount64() - t0);
+
+    int found = 0;
+    for (int s = 0; s < ns; ++s) {
+        uintptr_t refs[8];
+        int nr = 0;
+        ForEachPrivateRW([&](const MEMORY_BASIC_INFORMATION& m) {
+            nr += FindQwordInRegion((const uintptr_t*)m.BaseAddress, m.RegionSize / 8, strHits[s], refs + nr, 8 - nr);
+            return nr < 8;
+        });
+        for (int r = 0; r < nr; ++r) {
+            CVarObj c;
+            c.obj = refs[r] - 8;
+            c.help = strHits[s];
+            if (!SafeRead((void*)c.obj, c.dump, sizeof(c.dump))) continue;
+            c.vtable = *reinterpret_cast<uintptr_t*>(c.dump);
+            int num = *reinterpret_cast<int*>(c.dump + 0x10), cap = *reinterpret_cast<int*>(c.dump + 0x14);
+            if (!InImage(c.vtable) || num != (int)N || cap < num) continue;
+            uintptr_t vfn0 = 0;
+            if (!SafeRead((void*)c.vtable, &vfn0, 8) || !InImage(vfn0)) continue;
+
+            char hex[sizeof(c.dump) * 2 + 1];
+            for (size_t i = 0; i < sizeof(c.dump); ++i) sprintf_s(hex + i * 2, 3, "%02X", c.dump[i]);
+            Log("candidate object %p vtable_rva=0x%llX dump=%s", (void*)c.obj, (unsigned long long)(c.vtable - g_base), hex);
+            if (found < max) out[found] = c;
+            ++found;
+        }
+    }
+    return found;
+}
+
 struct CVarMem {
     uintptr_t obj = 0;
     uintptr_t vtable = 0;
@@ -125,63 +198,33 @@ struct CVarMem {
 };
 
 // The object is still the one we found (vtable and Help pointer unchanged).
-bool StillValid(const CVarMem& cv)
+bool StillValid(uintptr_t obj, uintptr_t vtable, uintptr_t help)
 {
     uintptr_t h[2];
-    return SafeRead(reinterpret_cast<void*>(cv.obj), h, sizeof(h)) && h[0] == cv.vtable && h[1] == cv.help;
+    return SafeRead(reinterpret_cast<void*>(obj), h, sizeof(h)) && h[0] == vtable && h[1] == help;
 }
+bool StillValid(const CVarMem& cv) { return StillValid(cv.obj, cv.vtable, cv.help); }
 
 bool LocateEnableCVar(CVarMem& cv, int current)
 {
-    const size_t bytes = sizeof(kEnableHelp);           // includes terminator
-    const int numChars = (int)(bytes / sizeof(wchar_t));
-    uintptr_t strHits[8];
-    int ns = 0;
-    ULONGLONG t0 = GetTickCount64();
-    ForEachPrivateRW([&](const MEMORY_BASIC_INFORMATION& m) {
-        ns += FindWStrInRegion((const char*)m.BaseAddress, m.RegionSize, kEnableHelp, bytes, strHits + ns, 8 - ns);
-        return ns < 8;
-    });
-    Log("help string copies on heap: %d (%llu ms)", ns, GetTickCount64() - t0);
-
+    CVarObj objs[4];
+    int n = FindCVarObjects(kEnableHelp, objs, 4);
+    if (n > 4) { Log("too many cvar objects (%d)", n); return false; }
     int found = 0;
-    CVarMem best;
-    for (int s = 0; s < ns; ++s) {
-        uintptr_t refs[8];
-        int nr = 0;
-        ForEachPrivateRW([&](const MEMORY_BASIC_INFORMATION& m) {
-            nr += FindQwordInRegion((const uintptr_t*)m.BaseAddress, m.RegionSize / 8, strHits[s], refs + nr, 8 - nr);
-            return nr < 8;
-        });
-        for (int r = 0; r < nr; ++r) {
-            uintptr_t obj = refs[r] - 8;              // FString Help right after the vtable
-            unsigned char dump[kScanTo + 8];
-            if (!SafeRead((void*)obj, dump, sizeof(dump))) continue;
-            uintptr_t vt = *reinterpret_cast<uintptr_t*>(dump);
-            int num = *reinterpret_cast<int*>(dump + 0x10), max = *reinterpret_cast<int*>(dump + 0x14);
-            if (!InImage(vt) || num != numChars || max < num) continue;
-            uintptr_t vfn0 = 0;
-            if (!SafeRead((void*)vt, &vfn0, 8) || !InImage(vfn0)) continue;
-
-            char hex[sizeof(dump) * 2 + 1];
-            for (size_t i = 0; i < sizeof(dump); ++i) sprintf_s(hex + i * 2, 3, "%02X", dump[i]);
-            Log("candidate object %p vtable_rva=0x%llX dump=%s", (void*)obj, (unsigned long long)(vt - g_base), hex);
-
-            CVarMem c;
-            c.obj = obj; c.vtable = vt; c.help = strHits[s];
-            for (int off = kScanFrom; off + 8 <= kScanTo + 8 && c.numCandidates < 32; off += 4) {
-                int a = *reinterpret_cast<int*>(dump + off), b = *reinterpret_cast<int*>(dump + off + 4);
-                if (a == current && b == current) c.candidates[c.numCandidates++] = off;
-            }
-            Log("  value pair candidates for %d: %d", current, c.numCandidates);
-            if (c.numCandidates > 0) { best = c; ++found; }
+    for (int i = 0; i < n; ++i) {
+        CVarMem c;
+        c.obj = objs[i].obj; c.vtable = objs[i].vtable; c.help = objs[i].help;
+        for (int off = kScanFrom; off + 8 <= kScanTo + 8 && c.numCandidates < 32; off += 4) {
+            int a = *reinterpret_cast<int*>(objs[i].dump + off), b = *reinterpret_cast<int*>(objs[i].dump + off + 4);
+            if (a == current && b == current) c.candidates[c.numCandidates++] = off;
         }
+        Log("  value pair candidates for %d: %d", current, c.numCandidates);
+        if (c.numCandidates > 0) { cv = c; ++found; }
     }
     if (found != 1) {
         Log("need exactly one candidate object, got %d", found);
         return false;
     }
-    cv = best;
     return true;
 }
 
@@ -214,6 +257,77 @@ void Confirm(CVarMem& cv, int newValue)
     }
 }
 
+// ---------------- full screen menu detection ----------------
+// The game never changes this cvar, so its offset cannot be learned like Enable's.
+// It is declared next to Enable in the same plugin: an int32 cvar has Enable's vtable
+// and the same data offset; otherwise it is taken as a bool cvar (1-byte values) at
+// that offset. Every write is verified by reading the cvar back through the engine;
+// on any mismatch the old bytes are restored and the feature is turned off.
+struct MenuCVar {
+    uintptr_t obj = 0, vtable = 0, help = 0;
+    int off = -1;
+    int width = 0;        // 4 = int32, 1 = bool
+    bool ready = false, failed = false;
+};
+
+bool ReadPair(const MenuCVar& m, int* a, int* b)
+{
+    if (m.width == 4) return ReadInt(m.obj + m.off, a) && ReadInt(m.obj + m.off + 4, b);
+    unsigned char v[2];
+    if (!SafeRead(reinterpret_cast<void*>(m.obj + m.off), v, 2)) return false;
+    *a = v[0]; *b = v[1];
+    return true;
+}
+
+bool WritePair(const MenuCVar& m, int a, int b)
+{
+    if (m.width == 4) return WriteInt(m.obj + m.off, a) && WriteInt(m.obj + m.off + 4, b);
+    return WriteByte(m.obj + m.off, (unsigned char)a) && WriteByte(m.obj + m.off + 1, (unsigned char)b);
+}
+
+void SetupMenuCVar(MenuCVar& m, const CVarMem& enable)
+{
+    m.failed = true;
+    CVarObj objs[4];
+    int n = FindCVarObjects(kMenuHelp, objs, 4);
+    if (n != 1) { Log("menu detection: need exactly one cvar object, got %d", n); return; }
+    int api = -1;
+    if (!SafeCVar(kMenuName, &api) || api < 0 || api > 1) { Log("menu detection: engine value %d unexpected", api); return; }
+    m.obj = objs[0].obj; m.vtable = objs[0].vtable; m.help = objs[0].help;
+    m.off = enable.dataOff;
+    m.width = m.vtable == enable.vtable ? 4 : 1;
+    int a = -1, b = -1;
+    if (!ReadPair(m, &a, &b) || a != api || b != api) {
+        Log("menu detection: values at +0x%X (%s) are %d/%d, engine says %d", m.off, m.width == 4 ? "int" : "bool", a, b, api);
+        return;
+    }
+    Log("menu detection: cvar at %p +0x%X (%s), current %d", (void*)m.obj, m.off, m.width == 4 ? "int" : "bool", api);
+    m.failed = false;
+    m.ready = true;
+}
+
+// Returns false (and turns the feature off) if the engine does not see the new value.
+bool SetMenuDetection(MenuCVar& m, int value)
+{
+    int a = -1, b = -1;
+    if (!StillValid(m.obj, m.vtable, m.help) || !ReadPair(m, &a, &b) || a > 1 || b > 1) {
+        Log("menu detection: cvar object no longer valid");
+        m.failed = true;
+        return false;
+    }
+    if (a == value && b == value) return true;
+    if (!WritePair(m, value, value)) { Log("menu detection: write failed"); m.failed = true; return false; }
+    int api = -1;
+    if (!SafeCVar(kMenuName, &api) || api != value) {
+        WritePair(m, a, b);
+        Log("menu detection: engine reads %d after writing %d; restored, feature off", api, value);
+        m.failed = true;
+        return false;
+    }
+    Log("menu detection set to %d", value);
+    return true;
+}
+
 // ---------------- force loop ----------------
 bool KeyPressedEdge(bool& wasDown)
 {
@@ -225,14 +339,16 @@ bool KeyPressedEdge(bool& wasDown)
 
 void ForceLoop()
 {
-    Log("ForceFG mode=%d value=%d (Ctrl+F9 toggles)", g_forceMode, g_forceValue);
+    Settings cfg = ReadSettings();
+    Log("config EnableForceFG=%d FGSkipMenus=%d (Ctrl+F9 toggles forcing)", cfg.force, cfg.skipMenus);
+
     int v = 0;
     while (!SafeCVar(kEnableName, &v) || v == 0) Sleep(200);
     CVarMem cv;
     if (!LocateEnableCVar(cv, v)) { Log("cvar object not found; ForceFG disabled"); return; }
 
     // Learning: follow the game's own changes until the offset is confirmed.
-    int last = v, lastNonZero = v;
+    int last = v;
     while (cv.dataOff < 0) {
         if (!StillValid(cv)) { Log("object changed during learning; ForceFG disabled"); return; }
         if (cv.numCandidates == 0) { Log("no candidate survived; ForceFG disabled"); return; }
@@ -240,18 +356,31 @@ void ForceLoop()
             Confirm(cv, v);
             Log("game set Enable %d -> %d", last, v);
             last = v;
-            if (v != 0) lastNonZero = v;
         }
         Sleep(20);
     }
 
-    bool on = true, keyDown = false;
+    MenuCVar menu;
+    bool on = cfg.force, keyDown = false;
     RECT lastRect{};
-    ULONGLONG rectChanged = 0, lastLog = 0, lastWindowCheck = 0;
+    ULONGLONG rectChanged = 0, lastLog = 0, lastWindowCheck = 0, lastConfig = 0;
     bool stable = false;
     unsigned writes = 0, zeroSeen = 0;
     int lastS0 = last;
     for (;;) {
+        ULONGLONG now = GetTickCount64();
+        if (now - lastConfig >= 1000) {
+            lastConfig = now;
+            Settings n = ReadSettings();
+            if (n.force != cfg.force) { on = n.force; Log("config: forcing %s", on ? "ON" : "OFF"); }
+            if (n.skipMenus != cfg.skipMenus) Log("config: skip menus %s", n.skipMenus ? "ON" : "OFF");
+            cfg = n;
+            if (!menu.failed) {
+                if (!menu.ready && cfg.skipMenus) SetupMenuCVar(menu, cv);
+                if (menu.ready) SetMenuDetection(menu, cfg.skipMenus ? 1 : 0);
+            }
+        }
+
         if (KeyPressedEdge(keyDown)) { on = !on; Log("ForceFG toggled %s", on ? "ON" : "OFF"); }
 
         int s0 = 0, s1 = 0;
@@ -263,9 +392,8 @@ void ForceLoop()
             Log("unexpected values game=%d render=%d; ForceFG stopped", s0, s1);
             return;
         }
-        ULONGLONG now = GetTickCount64();
         if (s0 != lastS0) {
-            if (s0 == 0) ++zeroSeen; else if (s0 != g_forceValue) lastNonZero = s0;
+            if (s0 == 0) ++zeroSeen;
             if (now - lastLog > 1000) {
                 Log("Enable game=%d render=%d (game zero writes %u, our writes %u)", s0, s1, zeroSeen, writes);
                 lastLog = now;
@@ -283,24 +411,14 @@ void ForceLoop()
         }
 
         if (on && stable && (s0 == 0 || s1 == 0)) {
-            int target = g_forceValue > 0 ? g_forceValue : lastNonZero;
-            if (!WriteInt(cv.obj + cv.dataOff, target) || !WriteInt(cv.obj + cv.dataOff + 4, target)) {
+            if (!WriteInt(cv.obj + cv.dataOff, 1) || !WriteInt(cv.obj + cv.dataOff + 4, 1)) {
                 Log("write failed; ForceFG stopped");
                 return;
             }
-            if (writes++ == 0) Log("forcing Enable to %d", target);
-            lastS0 = target;
+            if (writes++ == 0) Log("forcing Enable to 1");
+            lastS0 = 1;
         }
         Sleep(1);
-    }
-}
-
-void LogOnlyLoop()
-{
-    int last = INT_MIN, v = 0;
-    for (;;) {
-        if (SafeCVar(kEnableName, &v) && v != last) { Log("CVAR Enable = %d", v); last = v; }
-        Sleep(50);
     }
 }
 
@@ -308,7 +426,7 @@ DWORD WINAPI TraceThread(LPVOID)
 {
     while (!scanOffsetsDone) Sleep(100);
     Log("offsets ready");
-    if (g_forceMode >= 2) ForceLoop(); else LogOnlyLoop();
+    ForceLoop();
     return 0;
 }
 
@@ -320,12 +438,10 @@ void StartFGTrace(HMODULE hModule)
     GetModuleFileNameW(hModule, path, MAX_PATH);
     std::wstring dir = path;
     dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
-    std::wstring ini = dir + L"ww_fgtrace.ini";
-    if (GetPrivateProfileIntW(L"FGTrace", L"Enable", 0, ini.c_str()) != 1) return;
+    wcsncpy_s(g_configPath, (dir + L"configww.ini").c_str(), _TRUNCATE);
+    Settings cfg = ReadSettings();
+    if (!cfg.force && !cfg.skipMenus) return;      // not requested at launch; nothing runs
 
-    g_forceMode = GetPrivateProfileIntW(L"FGTrace", L"ForceMode", 0, ini.c_str());
-    g_forceValue = GetPrivateProfileIntW(L"FGTrace", L"ForceValue", 1, ini.c_str());
-    if (g_forceValue < 0 || g_forceValue > 2) g_forceValue = 1;
     wcsncpy_s(g_logPath, (dir + L"ww_fgtrace.log").c_str(), _TRUNCATE);
     HMODULE exe = GetModuleHandleW(nullptr);
     g_base = reinterpret_cast<uintptr_t>(exe);

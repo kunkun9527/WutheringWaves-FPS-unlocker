@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ww_unlockfps"
         mc:Ignorable="d"
         xmlns:xctk="clr-namespace:Xceed.Wpf.Toolkit;assembly=Xceed.Wpf.Toolkit"
-        Title="Wuther FPS Unlocker" Height="365" Width="350" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen">
+        Title="Wuther FPS Unlocker" Height="398" Width="350" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen">
 
     <DockPanel Background="{DynamicResource GradientBackground}">
         <Menu DockPanel.Dock="Top">
@@ -193,6 +193,37 @@
 
                     <CheckBox.ToolTip>
                         <ToolTip Content="Enable before starting the game, otherwise it won’t work"/>
+                    </CheckBox.ToolTip>
+                </CheckBox>
+            </Grid>
+
+            <!-- 强开帧生成 / 跳过菜单 -->
+            <Grid Margin="0,15,0,0" IsEnabled="{Binding IsChecked, ElementName=cb_advanced}">
+
+                <CheckBox 
+                  x:Name="check_forcefg"
+                  Content="Force Frame Gen" Foreground="RoyalBlue"
+                  VerticalContentAlignment="Center" 
+                  FontSize="13"
+                  VerticalAlignment="Center"
+                  HorizontalAlignment="Left">
+
+                    <CheckBox.ToolTip>
+                        <ToolTip Content="Keep DLSS Frame Generation on in menus and dialogue. Enable before starting the game; Ctrl+F9 toggles it in game"/>
+                    </CheckBox.ToolTip>
+                </CheckBox>
+
+                <CheckBox 
+                  x:Name="check_fgskipmenu"
+                  IsEnabled="{Binding IsChecked, ElementName=check_forcefg}"
+                  Content="Skip Menus" Foreground="RoyalBlue"
+                  VerticalContentAlignment="Center" Margin="135,0,0,0"
+                  FontSize="13"
+                  VerticalAlignment="Center"
+                  HorizontalAlignment="Left">
+
+                    <CheckBox.ToolTip>
+                        <ToolTip Content="Let DLSS turn Frame Generation off on full screen menus (r.Streamline.DLSSG.FullScreenMenuDetection)"/>
                     </CheckBox.ToolTip>
                 </CheckBox>
             </Grid>

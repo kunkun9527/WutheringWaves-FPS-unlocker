@@ -76,6 +76,8 @@ namespace ww_unlockfps
         private const string OptionKey12 = "RemoveBlurEnabled";
         private const string OptionKey13 = "AutoCloseEnabled";
         private const string OptionKey14 = "UseMobileUI";
+        private const string OptionKey15 = "ForceFGEnabled";
+        private const string OptionKey16 = "FGSkipMenusEnabled";
 
         private bool ShouldCenterWindow { get; set; }
         private bool checkautostart = false;
@@ -554,6 +556,9 @@ namespace ww_unlockfps
                 check_fov.IsChecked = bool.Parse(data[Section][OptionKey9]);
                 check_hideuid.IsChecked = bool.Parse(data[Section][OptionKey10]);
                 check_removeblur.IsChecked = bool.Parse(data[Section][OptionKey12]);
+                // 旧配置没有这两项，缺省为关
+                check_forcefg.IsChecked = bool.TryParse(data[Section][OptionKey15], out bool forceFg) && forceFg;
+                check_fgskipmenu.IsChecked = bool.TryParse(data[Section][OptionKey16], out bool fgSkipMenus) && fgSkipMenus;
                 string FovValueStr = data[Section][OptionKey11];
                 if (double.TryParse(FovValueStr, out double fovValue))
                 {
@@ -612,12 +617,16 @@ namespace ww_unlockfps
             data[Section][OptionKey12] = false.ToString();
             data[Section][OptionKey13] = true.ToString();
             data[Section][OptionKey14] = false.ToString();
+            data[Section][OptionKey15] = false.ToString();
+            data[Section][OptionKey16] = false.ToString();
             check_auto_start.IsChecked = false;
             check_power_saving.IsChecked = false;
             ck_default.IsChecked = true;
             cb_advanced.IsChecked = false;
             check_fov.IsChecked = false;
             check_hideuid.IsChecked = false;
+            check_forcefg.IsChecked = false;
+            check_fgskipmenu.IsChecked = false;
             Tb_main.Text = ((int)(165)).ToString();
             sli_main.Value = 165;
             Tb_fov.Value = 45;
@@ -657,9 +666,26 @@ namespace ww_unlockfps
             data[Section][OptionKey12] = check_removeblur.IsChecked.ToString();
             data[Section][OptionKey13] = check_auto_close.IsChecked.ToString();
             data[Section][OptionKey14] = check_use_mbui.IsChecked.ToString();
+            data[Section][OptionKey15] = check_forcefg.IsChecked.ToString();
+            data[Section][OptionKey16] = check_fgskipmenu.IsChecked.ToString();
             parser.WriteFile(ConfigFileName, data);
         }
 
+
+        // 强开帧生成 / 跳过菜单写入configww.ini，插件每秒读取；未开高级功能时都写 0
+        private void WriteForceFGConfig(string filePath)
+        {
+            bool advan = false, force = false, skip = false;
+            Dispatcher.Invoke(() =>
+            {
+                advan = cb_advanced.IsChecked == true;
+                force = check_forcefg.IsChecked == true;
+                skip = check_fgskipmenu.IsChecked == true;
+            });
+            force &= advan;
+            WritePrivateProfileString("Configs", "EnableForceFG", force ? "1" : "0", filePath);
+            WritePrivateProfileString("Configs", "FGSkipMenus", force && skip ? "1" : "0", filePath);
+        }
 
         private void TextBox_PreviewTextInput(object sender, TextCompositionEventArgs e)
         {
@@ -1046,6 +1072,7 @@ namespace ww_unlockfps
                 WritePrivateProfileString("Configs", "EnableRemoveBlur", check_removeblur.IsChecked == true ? "1" : "0", filePath);
                 // 写入是否使用移动端UI的设置到configww.ini，供插件读取 261023
                 WritePrivateProfileString("Configs", "UseMobileUI", check_use_mbui.IsChecked == true ? "1" : "0", filePath);
+                WriteForceFGConfig(filePath);
             }
             catch (Exception ex)
             {
@@ -2949,6 +2976,7 @@ namespace ww_unlockfps
                         }
 
                         WritePrivateProfileString("Configs","EnableRemoveBlur", enableRemoveBlur ? "1" : "0", filePath);
+                        WriteForceFGConfig(filePath);
                     }
                     catch (Exception ex)
                     {
@@ -3026,6 +3054,7 @@ namespace ww_unlockfps
                 WritePrivateProfileString("Configs", "EnableRemoveBlur", check_removeblur.IsChecked == true ? "1" : "0", filePath);
                 // 写入是否使用移动端UI的设置到configww.ini，供插件读取 261023
                 WritePrivateProfileString("Configs", "UseMobileUI", check_use_mbui.IsChecked == true ? "1" : "0", filePath);
+                WriteForceFGConfig(filePath);
             }
             catch (Exception ex)
             {
