@@ -691,7 +691,9 @@ void BackgroundSearchLoop() {
         if (g_EnableHideUID == 1) {
             HideUID();
         }
-        else {
+        // Skip the idle pre-search (up to 100 threads every 100 ms) while UID hiding is off;
+        // HideUID() searches on its own when the user enables it.
+        else if (g_EnableHideUID == 1) {
             UWorld* world = GetWorld();
             if (world) {
                 ULevel** levels = nullptr;
@@ -960,8 +962,10 @@ DWORD WINAPI MainThread(HMODULE hModule) {
                     }
                 }
 
+                // Only reset the FOV once when it was applied; calling FOV(0) every 100 ms
+                // from this background thread is unnecessary game-thread work.
                 if (g_EnableAdvan == 0) {
-                    pc->FOV(0.0f);
+                    if (fovApplied) pc->FOV(0.0f);
                     fovApplied = false;
                 }
                 else if (g_EnableFov == 1) {
@@ -972,7 +976,7 @@ DWORD WINAPI MainThread(HMODULE hModule) {
                     }
                 }
                 else {
-                    pc->FOV(0.0f);
+                    if (fovApplied) pc->FOV(0.0f);
                     fovApplied = false;
                 }
 
