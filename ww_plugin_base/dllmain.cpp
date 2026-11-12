@@ -359,6 +359,21 @@ void RunLogic()
         return;
     }
 
+    // configww.ini [Configs] SkipFPSUnlock=1：不做 FPS 解锁（不扫描、不弹窗），其他功能不受影响
+    HMODULE hSelf = nullptr;
+    wchar_t iniPath[MAX_PATH]{};
+    if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            reinterpret_cast<LPCWSTR>(&RunLogic), &hSelf) &&
+        GetModuleFileNameW(hSelf, iniPath, MAX_PATH))
+    {
+        std::wstring ini = iniPath;
+        ini = ini.substr(0, ini.find_last_of(L"\\/") + 1) + L"configww.ini";
+        if (GetPrivateProfileIntW(L"Configs", L"SkipFPSUnlock", 0, ini.c_str()) == 1)
+        {
+            return;
+        }
+    }
+
     auto _fps_code = XorString::decrypt(encrypted_strings::fps_code.data(), encrypted_strings::fps_code.size());
     auto fps_scan_results = PatternScanner::MultipleScan(_fps_code.c_str());
 
