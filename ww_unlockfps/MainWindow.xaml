@@ -211,7 +211,7 @@
                 </CheckBox>
             </Grid>
 
-            <!-- 强开帧生成 / 跳过菜单 -->
+            <!-- 强开帧生成 -->
             <Grid Margin="0,15,0,0" IsEnabled="{Binding IsChecked, ElementName=cb_advanced}">
 
                 <CheckBox 
@@ -227,19 +227,6 @@
                     </CheckBox.ToolTip>
                 </CheckBox>
 
-                <CheckBox 
-                  x:Name="check_fgskipmenu"
-                  IsEnabled="{Binding IsChecked, ElementName=check_forcefg}"
-                  Content="Skip Menus" Foreground="RoyalBlue"
-                  VerticalContentAlignment="Center" Margin="135,0,0,0"
-                  FontSize="13"
-                  VerticalAlignment="Center"
-                  HorizontalAlignment="Left">
-
-                    <CheckBox.ToolTip>
-                        <ToolTip Content="Let DLSS turn Frame Generation off on full screen menus (r.Streamline.DLSSG.FullScreenMenuDetection)"/>
-                    </CheckBox.ToolTip>
-                </CheckBox>
             </Grid>
 
             <!-- 使用 Grid 替代 StackPanel -->

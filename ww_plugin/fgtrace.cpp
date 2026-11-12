@@ -4,11 +4,9 @@
 // FConsoleVariable<int32> object in memory and writes its shadowed values back.
 // (Raising the cvar's SetBy priority was tried and does not stop the game's writes.)
 //
-// Runs only if one of these is on at launch; afterwards they are re-read once a second
-// from configww.ini [Configs] (written by the launcher):
+// Runs only if configww.ini [Configs] EnableForceFG=1 (written by the launcher) at launch;
+// afterwards it is re-read once a second:
 //   EnableForceFG=1  keep Enable at 1 (always on) whenever the game sets it to 0
-//   FGSkipMenus=1    set r.Streamline.DLSSG.FullScreenMenuDetection=1, so Streamline
-//                    itself turns FG off on full screen menus
 // Ctrl+F9 toggles forcing in game. Log: ww_fgtrace.log next to this DLL.
 #include <windows.h>
 #include <climits>
@@ -50,17 +48,9 @@ void Log(const char* fmt, ...)
     fclose(fp);
 }
 
-struct Settings {
-    bool force = false;
-    bool skipMenus = false;
-};
-
-Settings ReadSettings()
+bool ReadForceSetting()
 {
-    Settings s;
-    s.force = GetPrivateProfileIntW(L"Configs", L"EnableForceFG", 0, g_configPath) == 1;
-    s.skipMenus = GetPrivateProfileIntW(L"Configs", L"FGSkipMenus", 0, g_configPath) == 1;
-    return s;
+    return GetPrivateProfileIntW(L"Configs", L"EnableForceFG", 0, g_configPath) == 1;
 }
 
 bool InImage(uintptr_t a) { return a >= g_base && a < g_base + g_imageSize; }
@@ -76,11 +66,6 @@ bool WriteInt(uintptr_t a, int v)
     __try { *reinterpret_cast<volatile int*>(a) = v; return true; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
-bool WriteByte(uintptr_t a, unsigned char v)
-{
-    __try { *reinterpret_cast<volatile unsigned char*>(a) = v; return true; }
-    __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
-}
 
 // Reads a cvar through KismetSystemLibrary (ProcessEvent). Used for learning and verifying.
 int CVarImpl(const wchar_t* name) { return UKismetSystemLibrary::GetConsoleVariableIntValue(FString(name)); }
@@ -93,8 +78,6 @@ bool SafeCVar(const wchar_t* name, int* out)
 // ---------------- locate cvar objects ----------------
 const wchar_t kEnableName[] = L"r.Streamline.DLSSG.Enable";
 const wchar_t kEnableHelp[] = L"DLSS-FG mode (default = 0)\n0: off\n1: always on\n2: auto mode (on only when it helps)\n";
-const wchar_t kMenuName[] = L"r.Streamline.DLSSG.FullScreenMenuDetection";
-const wchar_t kMenuHelp[] = L"Automatically disable DLSS-FG if full screen menus are detected (default = false)\n";
 constexpr int kScanFrom = 0x18;
 constexpr int kScanTo = 0x60;      // keep the search inside a small object
 
@@ -198,12 +181,11 @@ struct CVarMem {
 };
 
 // The object is still the one we found (vtable and Help pointer unchanged).
-bool StillValid(uintptr_t obj, uintptr_t vtable, uintptr_t help)
+bool StillValid(const CVarMem& cv)
 {
     uintptr_t h[2];
-    return SafeRead(reinterpret_cast<void*>(obj), h, sizeof(h)) && h[0] == vtable && h[1] == help;
+    return SafeRead(reinterpret_cast<void*>(cv.obj), h, sizeof(h)) && h[0] == cv.vtable && h[1] == cv.help;
 }
-bool StillValid(const CVarMem& cv) { return StillValid(cv.obj, cv.vtable, cv.help); }
 
 bool LocateEnableCVar(CVarMem& cv, int current)
 {
@@ -257,77 +239,6 @@ void Confirm(CVarMem& cv, int newValue)
     }
 }
 
-// ---------------- full screen menu detection ----------------
-// The game never changes this cvar, so its offset cannot be learned like Enable's.
-// It is declared next to Enable in the same plugin: an int32 cvar has Enable's vtable
-// and the same data offset; otherwise it is taken as a bool cvar (1-byte values) at
-// that offset. Every write is verified by reading the cvar back through the engine;
-// on any mismatch the old bytes are restored and the feature is turned off.
-struct MenuCVar {
-    uintptr_t obj = 0, vtable = 0, help = 0;
-    int off = -1;
-    int width = 0;        // 4 = int32, 1 = bool
-    bool ready = false, failed = false;
-};
-
-bool ReadPair(const MenuCVar& m, int* a, int* b)
-{
-    if (m.width == 4) return ReadInt(m.obj + m.off, a) && ReadInt(m.obj + m.off + 4, b);
-    unsigned char v[2];
-    if (!SafeRead(reinterpret_cast<void*>(m.obj + m.off), v, 2)) return false;
-    *a = v[0]; *b = v[1];
-    return true;
-}
-
-bool WritePair(const MenuCVar& m, int a, int b)
-{
-    if (m.width == 4) return WriteInt(m.obj + m.off, a) && WriteInt(m.obj + m.off + 4, b);
-    return WriteByte(m.obj + m.off, (unsigned char)a) && WriteByte(m.obj + m.off + 1, (unsigned char)b);
-}
-
-void SetupMenuCVar(MenuCVar& m, const CVarMem& enable)
-{
-    m.failed = true;
-    CVarObj objs[4];
-    int n = FindCVarObjects(kMenuHelp, objs, 4);
-    if (n != 1) { Log("menu detection: need exactly one cvar object, got %d", n); return; }
-    int api = -1;
-    if (!SafeCVar(kMenuName, &api) || api < 0 || api > 1) { Log("menu detection: engine value %d unexpected", api); return; }
-    m.obj = objs[0].obj; m.vtable = objs[0].vtable; m.help = objs[0].help;
-    m.off = enable.dataOff;
-    m.width = m.vtable == enable.vtable ? 4 : 1;
-    int a = -1, b = -1;
-    if (!ReadPair(m, &a, &b) || a != api || b != api) {
-        Log("menu detection: values at +0x%X (%s) are %d/%d, engine says %d", m.off, m.width == 4 ? "int" : "bool", a, b, api);
-        return;
-    }
-    Log("menu detection: cvar at %p +0x%X (%s), current %d", (void*)m.obj, m.off, m.width == 4 ? "int" : "bool", api);
-    m.failed = false;
-    m.ready = true;
-}
-
-// Returns false (and turns the feature off) if the engine does not see the new value.
-bool SetMenuDetection(MenuCVar& m, int value)
-{
-    int a = -1, b = -1;
-    if (!StillValid(m.obj, m.vtable, m.help) || !ReadPair(m, &a, &b) || a > 1 || b > 1) {
-        Log("menu detection: cvar object no longer valid");
-        m.failed = true;
-        return false;
-    }
-    if (a == value && b == value) return true;
-    if (!WritePair(m, value, value)) { Log("menu detection: write failed"); m.failed = true; return false; }
-    int api = -1;
-    if (!SafeCVar(kMenuName, &api) || api != value) {
-        WritePair(m, a, b);
-        Log("menu detection: engine reads %d after writing %d; restored, feature off", api, value);
-        m.failed = true;
-        return false;
-    }
-    Log("menu detection set to %d", value);
-    return true;
-}
-
 // ---------------- force loop ----------------
 bool KeyPressedEdge(bool& wasDown)
 {
@@ -339,8 +250,8 @@ bool KeyPressedEdge(bool& wasDown)
 
 void ForceLoop()
 {
-    Settings cfg = ReadSettings();
-    Log("config EnableForceFG=%d FGSkipMenus=%d (Ctrl+F9 toggles forcing)", cfg.force, cfg.skipMenus);
+    bool cfgForce = ReadForceSetting();
+    Log("config EnableForceFG=%d (Ctrl+F9 toggles forcing)", cfgForce);
 
     int v = 0;
     while (!SafeCVar(kEnableName, &v) || v == 0) Sleep(200);
@@ -360,8 +271,7 @@ void ForceLoop()
         Sleep(20);
     }
 
-    MenuCVar menu;
-    bool on = cfg.force, keyDown = false;
+    bool on = cfgForce, keyDown = false;
     RECT lastRect{};
     ULONGLONG rectChanged = 0, lastLog = 0, lastWindowCheck = 0, lastConfig = 0;
     bool stable = false;
@@ -371,14 +281,9 @@ void ForceLoop()
         ULONGLONG now = GetTickCount64();
         if (now - lastConfig >= 1000) {
             lastConfig = now;
-            Settings n = ReadSettings();
-            if (n.force != cfg.force) { on = n.force; Log("config: forcing %s", on ? "ON" : "OFF"); }
-            if (n.skipMenus != cfg.skipMenus) Log("config: skip menus %s", n.skipMenus ? "ON" : "OFF");
-            cfg = n;
-            if (!menu.failed) {
-                if (!menu.ready && cfg.skipMenus) SetupMenuCVar(menu, cv);
-                if (menu.ready) SetMenuDetection(menu, cfg.skipMenus ? 1 : 0);
-            }
+            bool n = ReadForceSetting();
+            if (n != cfgForce) { on = n; Log("config: forcing %s", on ? "ON" : "OFF"); }
+            cfgForce = n;
         }
 
         if (KeyPressedEdge(keyDown)) { on = !on; Log("ForceFG toggled %s", on ? "ON" : "OFF"); }
@@ -439,8 +344,7 @@ void StartFGTrace(HMODULE hModule)
     std::wstring dir = path;
     dir = dir.substr(0, dir.find_last_of(L"\\/") + 1);
     wcsncpy_s(g_configPath, (dir + L"configww.ini").c_str(), _TRUNCATE);
-    Settings cfg = ReadSettings();
-    if (!cfg.force && !cfg.skipMenus) return;      // not requested at launch; nothing runs
+    if (!ReadForceSetting()) return;      // not requested at launch; nothing runs
 
     wcsncpy_s(g_logPath, (dir + L"ww_fgtrace.log").c_str(), _TRUNCATE);
     HMODULE exe = GetModuleHandleW(nullptr);
