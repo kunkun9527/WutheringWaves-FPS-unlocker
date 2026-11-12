@@ -678,6 +678,22 @@ namespace ww_unlockfps
         }
 
 
+        // 基础插件只负责 FPS 解锁和移动端 UI，两者都不用时不注入；高级插件只在开启高级功能时注入
+        private List<string> BuildInjectList(string baseDll, string advancedDll)
+        {
+            bool unlock = true, mobileUi = false, advanced = false;
+            Dispatcher.Invoke(() =>
+            {
+                unlock = check_unlockfps.IsChecked == true;
+                mobileUi = check_use_mbui.IsChecked == true;
+                advanced = cb_advanced.IsChecked == true;
+            });
+            var dlls = new List<string>();
+            if (unlock || mobileUi) dlls.Add(baseDll);
+            if (advanced) dlls.Add(advancedDll);
+            return dlls;
+        }
+
         // 强开帧生成 / 跳过菜单写入configww.ini，插件每秒读取；未开高级功能时都写 0
         // FPS 解锁开关与高级功能无关，基础插件在游戏窗口出现后读取一次
         private void WriteForceFGConfig(string filePath)
@@ -1186,19 +1202,7 @@ namespace ww_unlockfps
                         }
 
                         // 注入fpsDLL 26011
-                        List<string> dlls = null;
-                        dlls = new List<string> { dllToInject_fps };
-
-                        //修复：在UI线程上获取cb_advanced的状态 260611
-                        bool shouldinject = false;
-                        Application.Current.Dispatcher.Invoke(() =>
-                        {
-                            shouldinject = cb_advanced.IsChecked == true;
-                        });
-                        if (shouldinject)
-                        {
-                            dlls.Add(dllToInject);
-                        }
+                        List<string> dlls = BuildInjectList(dllToInject_fps, dllToInject);
 
                         bool injectSuccess = StartAndInject(targetExe, args, dlls, true);
 
@@ -1334,19 +1338,7 @@ namespace ww_unlockfps
 
 
                         // 注入fpsDLL 26011
-                        List<string> dlls = null;
-                        dlls = new List<string> { dllToInject_fps };
-
-                        //修复：在UI线程上获取cb_advanced的状态 260611
-                        bool shouldinject = false;
-                        Application.Current.Dispatcher.Invoke(() =>
-                        {
-                            shouldinject = cb_advanced.IsChecked == true;
-                        });
-                        if (shouldinject)
-                        {
-                            dlls.Add(dllToInject);
-                        }
+                        List<string> dlls = BuildInjectList(dllToInject_fps, dllToInject);
 
                         bool injectSuccess = StartAndInject(targetExe, args, dlls, true);
 
@@ -1505,23 +1497,7 @@ namespace ww_unlockfps
                             string dllToInject = Path.Combine(baseDir, @"ulk_ww_tools\ww_ulk_plugin.dll");
                             string dllToInject_fps = Path.Combine(baseDir, @"ulk_ww_tools\ww_ulk_plugin_base.dll");
 
-                            List<string> dlls = new List<string>
-                            {
-                                dllToInject_fps
-                            };
-
-                            // 修复：在UI线程上获取cb_advanced状态
-                            bool shouldinject = false;
-
-                            Application.Current.Dispatcher.Invoke(() =>
-                            {
-                                shouldinject = cb_advanced.IsChecked == true;
-                            });
-
-                            if (shouldinject)
-                            {
-                                dlls.Add(dllToInject);
-                            }
+                            List<string> dlls = BuildInjectList(dllToInject_fps, dllToInject);
 
                             InjectOnly(processNametest, dlls);
                         }
@@ -3152,20 +3128,7 @@ namespace ww_unlockfps
 
 
                             // 注入fpsDLL 26011
-                            List<string> dlls = null;
-                            dlls = new List<string> { dllToInject_fps };
-
-                            //修复：在UI线程上获取cb_advanced的状态 260611
-                            bool shouldinject = false;
-                            Application.Current.Dispatcher.Invoke(() =>
-                            {
-                                shouldinject = cb_advanced.IsChecked == true;
-                            });
-
-                            if (shouldinject)
-                            {
-                                dlls.Add(dllToInject);
-                            }
+                            List<string> dlls = BuildInjectList(dllToInject_fps, dllToInject);
 
                             InjectOnly(processNametest, dlls);
 

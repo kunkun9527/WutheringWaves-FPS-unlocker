@@ -86,7 +86,7 @@
               FontSize="13" Margin="0,8,0,0"
               HorizontalAlignment="Left">
                 <CheckBox.ToolTip>
-                    <ToolTip Content="Uncheck to skip the FPS unlock (e.g. when a game update breaks it). Other features still work. Set before starting the game"/>
+                    <ToolTip Content="Uncheck to skip the FPS unlock (e.g. when a game update breaks it); the FPS plugin is then not injected unless Mobile UI needs it. Advanced features still work. Set before starting the game"/>
                 </CheckBox.ToolTip>
             </CheckBox>
 
