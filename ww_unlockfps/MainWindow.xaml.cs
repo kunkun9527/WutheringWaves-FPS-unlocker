@@ -78,6 +78,7 @@ namespace ww_unlockfps
         private const string OptionKey14 = "UseMobileUI";
         private const string OptionKey15 = "ForceFGEnabled";
         private const string OptionKey16 = "FGSkipMenusEnabled";
+        private const string OptionKey17 = "FPSUnlockEnabled";
 
         private bool ShouldCenterWindow { get; set; }
         private bool checkautostart = false;
@@ -559,6 +560,8 @@ namespace ww_unlockfps
                 // 旧配置没有这两项，缺省为关
                 check_forcefg.IsChecked = bool.TryParse(data[Section][OptionKey15], out bool forceFg) && forceFg;
                 check_fgskipmenu.IsChecked = bool.TryParse(data[Section][OptionKey16], out bool fgSkipMenus) && fgSkipMenus;
+                // 旧配置没有这一项，缺省为开（原行为）
+                check_unlockfps.IsChecked = !bool.TryParse(data[Section][OptionKey17], out bool fpsUnlock) || fpsUnlock;
                 string FovValueStr = data[Section][OptionKey11];
                 if (double.TryParse(FovValueStr, out double fovValue))
                 {
@@ -619,6 +622,8 @@ namespace ww_unlockfps
             data[Section][OptionKey14] = false.ToString();
             data[Section][OptionKey15] = false.ToString();
             data[Section][OptionKey16] = false.ToString();
+            data[Section][OptionKey17] = true.ToString();
+            check_unlockfps.IsChecked = true;
             check_auto_start.IsChecked = false;
             check_power_saving.IsChecked = false;
             ck_default.IsChecked = true;
@@ -668,20 +673,24 @@ namespace ww_unlockfps
             data[Section][OptionKey14] = check_use_mbui.IsChecked.ToString();
             data[Section][OptionKey15] = check_forcefg.IsChecked.ToString();
             data[Section][OptionKey16] = check_fgskipmenu.IsChecked.ToString();
+            data[Section][OptionKey17] = check_unlockfps.IsChecked.ToString();
             parser.WriteFile(ConfigFileName, data);
         }
 
 
         // 强开帧生成 / 跳过菜单写入configww.ini，插件每秒读取；未开高级功能时都写 0
+        // FPS 解锁开关与高级功能无关，基础插件在游戏窗口出现后读取一次
         private void WriteForceFGConfig(string filePath)
         {
-            bool advan = false, force = false, skip = false;
+            bool advan = false, force = false, skip = false, unlock = true;
             Dispatcher.Invoke(() =>
             {
                 advan = cb_advanced.IsChecked == true;
                 force = check_forcefg.IsChecked == true;
                 skip = check_fgskipmenu.IsChecked == true;
+                unlock = check_unlockfps.IsChecked == true;
             });
+            WritePrivateProfileString("Configs", "SkipFPSUnlock", unlock ? "0" : "1", filePath);
             force &= advan;
             WritePrivateProfileString("Configs", "EnableForceFG", force ? "1" : "0", filePath);
             WritePrivateProfileString("Configs", "FGSkipMenus", force && skip ? "1" : "0", filePath);

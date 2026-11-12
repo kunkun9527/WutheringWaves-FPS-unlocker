@@ -6,7 +6,7 @@
         xmlns:local="clr-namespace:ww_unlockfps"
         mc:Ignorable="d"
         xmlns:xctk="clr-namespace:Xceed.Wpf.Toolkit;assembly=Xceed.Wpf.Toolkit"
-        Title="Wuther FPS Unlocker" Height="398" Width="350" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen">
+        Title="Wuther FPS Unlocker" Height="424" Width="350" ResizeMode="CanMinimize" WindowStartupLocation="CenterScreen">
 
     <DockPanel Background="{DynamicResource GradientBackground}">
         <Menu DockPanel.Dock="Top">
@@ -48,6 +48,7 @@
                    Margin="0,0,10,0"/>
 
                 <xctk:IntegerUpDown x:Name="Tb_main"
+                            IsEnabled="{Binding IsChecked, ElementName=check_unlockfps}"
                             Minimum="0" 
                             Maximum="420" 
                             FontSize="13"           
@@ -65,6 +66,7 @@
             <!-- 第二行：滑块控件 (自动位于正下方并居中) -->
             <Slider Style="{DynamicResource SliderStyle1}" 
             x:Name="sli_main"
+            IsEnabled="{Binding IsChecked, ElementName=check_unlockfps}"
             Width="280" 
             ValueChanged="Slider_ValueChanged_Main"
             Maximum="420" 
@@ -75,6 +77,18 @@
             SelectionEnd="{Binding RelativeSource={RelativeSource Self},Path=Value}" 
             IsSelectionRangeEnabled="True" 
             VerticalAlignment="Center"/>
+
+            <!-- FPS 解锁开关：取消后基础插件不扫描、不写帧率，其他功能不受影响 -->
+            <CheckBox x:Name="check_unlockfps"
+              IsChecked="True"
+              Content="Unlock FPS"
+              VerticalContentAlignment="Center"
+              FontSize="13" Margin="0,8,0,0"
+              HorizontalAlignment="Left">
+                <CheckBox.ToolTip>
+                    <ToolTip Content="Uncheck to skip the FPS unlock (e.g. when a game update breaks it). Other features still work. Set before starting the game"/>
+                </CheckBox.ToolTip>
+            </CheckBox>
 
 
 
